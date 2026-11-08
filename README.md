@@ -13,11 +13,7 @@ Linuxstats is a lightweight desktop system monitor for Linux. It shows live CPU,
 
 ## Screenshots
 
-Add a screenshot here later:
-
-```text
-[Your screenshot goes here]
-```
+Add this screenshot later
 
 ## Requirements
 
