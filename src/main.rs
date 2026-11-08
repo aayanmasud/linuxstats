@@ -1,7 +1,7 @@
 use std::{
     cmp::Ordering,
     env, fs,
-    path::{Path, PathBuf},
+    path::PathBuf,
     time::{Duration, Instant},
 };
 
@@ -45,11 +45,7 @@ impl MonitorApp {
             fans: Vec::new(),
             last_update: Instant::now(),
             animation_started: Instant::now(),
-            tutorial_step: if tutorial_is_completed() {
-                None
-            } else {
-                Some(0)
-            },
+            tutorial_step: if tutorial_is_completed() { None } else { Some(0) },
         };
 
         app.refresh_stats();
@@ -111,7 +107,6 @@ impl MonitorApp {
             .collect();
 
         processes.sort_by(|a, b| b.cpu.partial_cmp(&a.cpu).unwrap_or(Ordering::Equal));
-
         self.processes = processes.into_iter().take(10).collect();
     }
 }
@@ -125,9 +120,10 @@ fn read_fan_speeds() -> Vec<FanInfo> {
     for hwmon_entry in hwmon_entries.flatten() {
         let hwmon_path = hwmon_entry.path();
         let chip_name = fs::read_to_string(hwmon_path.join("name"))
+            .ok()
             .map(|name| name.trim().to_owned())
             .filter(|name| !name.is_empty())
-            .unwrap_or_else(|_| "Hardware monitor".to_owned());
+            .unwrap_or_else(|| "Hardware monitor".to_owned());
 
         let Ok(sensor_entries) = fs::read_dir(&hwmon_path) else {
             continue;
@@ -139,9 +135,7 @@ fn read_fan_speeds() -> Vec<FanInfo> {
             .filter(|path| {
                 path.file_name()
                     .and_then(|name| name.to_str())
-                    .map_or(false, |name| {
-                        name.starts_with("fan") && name.ends_with("_input")
-                    })
+                    .map_or(false, |name| name.starts_with("fan") && name.ends_with("_input"))
             })
             .collect();
         sensor_paths.sort();
@@ -163,9 +157,10 @@ fn read_fan_speeds() -> Vec<FanInfo> {
                 .unwrap_or("?");
             let label_path = input_path.with_file_name(format!("fan{sensor_number}_label"));
             let sensor_label = fs::read_to_string(label_path)
+                .ok()
                 .map(|label| label.trim().to_owned())
                 .filter(|label| !label.is_empty())
-                .unwrap_or_else(|_| format!("Fan {sensor_number}"));
+                .unwrap_or_else(|| format!("Fan {sensor_number}"));
 
             fans.push(FanInfo {
                 label: format!("{chip_name} · {sensor_label}"),
@@ -187,7 +182,7 @@ fn draw_fan_icon(ui: &mut egui::Ui, rotation: f32) {
     painter.circle_stroke(
         center,
         61.0,
-        egui::Stroke::new(1.5, egui::Color32::from_rgb(75, 85, 99)),
+        egui::Stroke::new(1.5_f32, egui::Color32::from_rgb(75, 85, 99)),
     );
 
     let blade_shape = [
@@ -214,7 +209,7 @@ fn draw_fan_icon(ui: &mut egui::Ui, rotation: f32) {
         painter.add(egui::Shape::convex_polygon(
             points,
             egui::Color32::from_rgb(96, 165, 250),
-            egui::Stroke::new(1.0, egui::Color32::from_rgb(147, 197, 253)),
+            egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(147, 197, 253)),
         ));
     }
 
@@ -257,9 +252,7 @@ fn format_uptime(seconds: u64) -> String {
 
 fn stat_row(ui: &mut egui::Ui, label: &str, percent: f32) {
     ui.label(label);
-
     ui.add(egui::ProgressBar::new(percent / 100.0).text(format!("{percent:.1}%")));
-
     ui.end_row();
 }
 
