@@ -2,12 +2,14 @@ use std::{
     cmp::Ordering,
     collections::HashSet,
     env, fs,
-    path::PathBuf,
+    path::{Path, PathBuf},
     time::{Duration, Instant},
 };
 
 use eframe::egui;
 use sysinfo::{Disks, System};
+
+const HIGH_FAN_RPM_WARNING: u32 = 6_200;
 
 struct ProcessInfo {
     pid: u32,
@@ -51,7 +53,6 @@ impl MonitorApp {
             fan_rotation: 0.0,
             tutorial_step: if tutorial_is_completed() { None } else { Some(0) },
         };
-
         app.refresh_stats();
         app
     }
@@ -105,16 +106,20 @@ impl MonitorApp {
         processes.sort_by(|a, b| b.cpu.partial_cmp(&a.cpu).unwrap_or(Ordering::Equal));
         self.processes = processes.into_iter().take(10).collect();
     }
+
+    fn max_fan_rpm(&self) -> u32 {
+        self.fans.iter().map(|fan| fan.rpm).max().unwrap_or(0)
+    }
 }
 
 fn append_fans_from_directory(
-    directory: &std::path::Path,
+    directory: &Path,
     chip_name: &str,
     fans: &mut Vec<FanInfo>,
     seen_paths: &mut HashSet<PathBuf>,
 ) {
-    let Ok(sensor_entries) = fs::read_dir(directory) else { return };
-    let mut sensor_paths: Vec<PathBuf> = sensor_entries
+    let Ok(entries) = fs::read_dir(directory) else { return };
+    let mut sensor_paths: Vec<PathBuf> = entries
         .flatten()
         .map(|entry| entry.path())
         .filter(|path| {
@@ -142,7 +147,6 @@ fn append_fans_from_directory(
             .map(|label| label.trim().to_owned())
             .filter(|label| !label.is_empty())
             .unwrap_or_else(|| format!("Fan {sensor_number}"));
-
         fans.push(FanInfo { label: format!("{chip_name} · {sensor_label}"), rpm });
     }
 }
@@ -151,21 +155,21 @@ fn read_fan_speeds() -> Vec<FanInfo> {
     let mut fans = Vec::new();
     let mut seen_paths = HashSet::new();
 
-    if let Ok(hwmon_entries) = fs::read_dir("/sys/class/hwmon") {
-        for entry in hwmon_entries.flatten() {
+    if let Ok(entries) = fs::read_dir("/sys/class/hwmon") {
+        for entry in entries.flatten() {
             let path = entry.path();
-            let chip_name = fs::read_to_string(path.join("name"))
+            let name = fs::read_to_string(path.join("name"))
                 .ok()
                 .map(|name| name.trim().to_owned())
                 .filter(|name| !name.is_empty())
                 .unwrap_or_else(|| "Hardware monitor".to_owned());
-            append_fans_from_directory(&path, &chip_name, &mut fans, &mut seen_paths);
+            append_fans_from_directory(&path, &name, &mut fans, &mut seen_paths);
         }
     }
 
     // Apple SMC exposes fan_input directly under applesmc platform devices on some Macs.
-    if let Ok(platform_entries) = fs::read_dir("/sys/devices/platform") {
-        for entry in platform_entries.flatten() {
+    if let Ok(entries) = fs::read_dir("/sys/devices/platform") {
+        for entry in entries.flatten() {
             if entry.file_name().to_str().map_or(false, |name| name.starts_with("applesmc.")) {
                 append_fans_from_directory(&entry.path(), "Apple SMC", &mut fans, &mut seen_paths);
             }
@@ -244,17 +248,17 @@ impl eframe::App for MonitorApp {
             self.last_update = Instant::now();
         }
 
-        // The icon's speed follows the fastest detected fan. Scale RPM to a
-        // screen-friendly rate (3000 RPM = one icon revolution per second).
         let now = Instant::now();
         let elapsed = now.duration_since(self.last_animation_update).as_secs_f32();
         self.last_animation_update = now;
-        let fan_rpm = self.fans.iter().map(|fan| fan.rpm).max().unwrap_or(0);
-        let revolutions_per_second = fan_rpm as f32 / 3000.0;
+        let fan_rpm = self.max_fan_rpm();
+        // 3000 RPM maps to one screen revolution per second; this is a visual scaling.
         self.fan_rotation = (self.fan_rotation
-            + elapsed * std::f32::consts::TAU * revolutions_per_second)
+            + elapsed * std::f32::consts::TAU * fan_rpm as f32 / 3000.0)
             .rem_euclid(std::f32::consts::TAU);
         let fan_rotation = self.fan_rotation;
+        let high_fan_speed = fan_rpm >= HIGH_FAN_RPM_WARNING;
+        let busiest_process = self.processes.first();
 
         let mut tutorial_action = None;
         if let Some(step) = self.tutorial_step {
@@ -293,8 +297,8 @@ impl eframe::App for MonitorApp {
             _ => {}
         }
 
-        egui::SidePanel::right("fan_panel").resizable(false).default_width(205.0).show(ctx, |ui| {
-            let top_space = ((ui.available_height() - 260.0) / 2.0).max(0.0);
+        egui::SidePanel::right("fan_panel").resizable(false).default_width(235.0).show(ctx, |ui| {
+            let top_space = ((ui.available_height() - 300.0) / 2.0).max(0.0);
             ui.add_space(top_space);
             ui.vertical_centered(|ui| {
                 ui.heading("Fan speed");
@@ -311,6 +315,22 @@ impl eframe::App for MonitorApp {
                         ui.label(format!("{} RPM", fan.rpm));
                         ui.add_space(8.0);
                     }
+                }
+                if high_fan_speed {
+                    ui.add_space(8.0);
+                    egui::Frame::group(ui.style())
+                        .fill(egui::Color32::from_rgb(75, 38, 20))
+                        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(249, 115, 22)))
+                        .show(ui, |ui| {
+                            ui.colored_label(egui::Color32::from_rgb(253, 186, 116), "⚠ High fan speed");
+                            ui.label(format!("Fan is at {fan_rpm} RPM."));
+                            if let Some(process) = busiest_process {
+                                ui.label(format!("Highest CPU use: {} ({:.1}%).", process.name, process.cpu));
+                                ui.label("Highlighted in the task list as a possible contributor—not a confirmed cause.");
+                            } else {
+                                ui.label("High system load or heat may be involved; no process data is available.");
+                            }
+                        });
                 }
                 ui.add_space(8.0);
                 ui.small("Readings refresh every second.");
@@ -329,14 +349,21 @@ impl eframe::App for MonitorApp {
             ui.add_space(16.0);
             ui.heading("Top Processes");
             ui.add_space(6.0);
+            if high_fan_speed {
+                ui.colored_label(egui::Color32::from_rgb(249, 115, 22), "⚠ High CPU process highlighted; it may contribute to heat, but this is not proof of cause.");
+                ui.add_space(4.0);
+            }
             egui::ScrollArea::vertical().max_height(350.0).show(ui, |ui| {
-                egui::Grid::new("process_table").striped(true).num_columns(4).show(ui, |ui| {
-                    ui.strong("PID"); ui.strong("Name"); ui.strong("CPU %"); ui.strong("Memory %"); ui.end_row();
-                    for process in &self.processes {
-                        ui.label(process.pid.to_string());
-                        ui.label(&process.name);
-                        ui.label(format!("{:.1}", process.cpu));
-                        ui.label(format!("{:.1}", process.memory));
+                egui::Grid::new("process_table").striped(true).num_columns(5).show(ui, |ui| {
+                    ui.strong(""); ui.strong("PID"); ui.strong("Name"); ui.strong("CPU %"); ui.strong("Memory %"); ui.end_row();
+                    for (index, process) in self.processes.iter().enumerate() {
+                        let highlight = high_fan_speed && index == 0;
+                        let color = if highlight { egui::Color32::from_rgb(253, 186, 116) } else { ui.visuals().text_color() };
+                        if highlight { ui.colored_label(color, "⚠"); } else { ui.label(""); }
+                        ui.colored_label(color, process.pid.to_string());
+                        ui.colored_label(color, &process.name);
+                        ui.colored_label(color, format!("{:.1}", process.cpu));
+                        ui.colored_label(color, format!("{:.1}", process.memory));
                         ui.end_row();
                     }
                 });
@@ -351,7 +378,7 @@ impl eframe::App for MonitorApp {
 
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([800.0, 600.0]).with_min_inner_size([500.0, 400.0]),
+        viewport: egui::ViewportBuilder::default().with_inner_size([900.0, 600.0]).with_min_inner_size([600.0, 400.0]),
         ..Default::default()
     };
     eframe::run_native("Linux System Monitor", options, Box::new(|_creation_context| Ok(Box::new(MonitorApp::new()))))
