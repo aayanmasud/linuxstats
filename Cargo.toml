@@ -1,0 +1,19 @@
+[package]
+name = "linuxstats"
+version = "0.1.0"
+edition = "2021"
+description = "A desktop system monitor for Linux"
+
+[dependencies]
+eframe = "0.31"
+sysinfo = "0.40"
+
+[package.metadata.deb]
+maintainer = "Your Name <aayanmasud@outlook.com>"
+copyright = "2026, Aayan Masud"
+depends = "$auto"
+section = "utils"
+priority = "optional"
+assets = [
+    ["assets/linuxstats.desktop", "usr/share/applications/linuxstats.desktop", "644"],
+]

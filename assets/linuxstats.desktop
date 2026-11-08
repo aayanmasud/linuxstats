@@ -1,0 +1,7 @@
+[Desktop Entry]
+Name=Linux System Monitor
+Comment=Monitor CPU, memory, disk, and processes
+Exec=linuxstats
+Terminal=false
+Type=Application
+Categories=System;Monitor;
