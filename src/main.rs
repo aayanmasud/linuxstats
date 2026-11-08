@@ -1,8 +1,7 @@
 use std::{
     cmp::Ordering,
-    env,
-    fs,
-    path::PathBuf,
+    env, fs,
+    path::{Path, PathBuf},
     time::{Duration, Instant},
 };
 
@@ -16,6 +15,11 @@ struct ProcessInfo {
     memory: f32,
 }
 
+struct FanInfo {
+    label: String,
+    rpm: u32,
+}
+
 struct MonitorApp {
     sys: System,
     cpu_percent: f32,
@@ -23,7 +27,9 @@ struct MonitorApp {
     disk_percent: f32,
     uptime: u64,
     processes: Vec<ProcessInfo>,
+    fans: Vec<FanInfo>,
     last_update: Instant,
+    animation_started: Instant,
     tutorial_step: Option<usize>,
 }
 
@@ -36,7 +42,9 @@ impl MonitorApp {
             disk_percent: 0.0,
             uptime: 0,
             processes: Vec::new(),
+            fans: Vec::new(),
             last_update: Instant::now(),
+            animation_started: Instant::now(),
             tutorial_step: if tutorial_is_completed() {
                 None
             } else {
@@ -53,6 +61,7 @@ impl MonitorApp {
 
         self.cpu_percent = self.sys.global_cpu_usage().clamp(0.0, 100.0);
         self.uptime = System::uptime().unwrap_or(0);
+        self.fans = read_fan_speeds();
 
         let total_memory = self.sys.total_memory();
         let used_memory = self.sys.used_memory();
@@ -105,6 +114,112 @@ impl MonitorApp {
 
         self.processes = processes.into_iter().take(10).collect();
     }
+}
+
+fn read_fan_speeds() -> Vec<FanInfo> {
+    let mut fans = Vec::new();
+    let Ok(hwmon_entries) = fs::read_dir("/sys/class/hwmon") else {
+        return fans;
+    };
+
+    for hwmon_entry in hwmon_entries.flatten() {
+        let hwmon_path = hwmon_entry.path();
+        let chip_name = fs::read_to_string(hwmon_path.join("name"))
+            .map(|name| name.trim().to_owned())
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|_| "Hardware monitor".to_owned());
+
+        let Ok(sensor_entries) = fs::read_dir(&hwmon_path) else {
+            continue;
+        };
+
+        let mut sensor_paths: Vec<PathBuf> = sensor_entries
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .map_or(false, |name| {
+                        name.starts_with("fan") && name.ends_with("_input")
+                    })
+            })
+            .collect();
+        sensor_paths.sort();
+
+        for input_path in sensor_paths {
+            let Ok(value) = fs::read_to_string(&input_path) else {
+                continue;
+            };
+            let Ok(rpm) = value.trim().parse::<u32>() else {
+                continue;
+            };
+
+            let Some(file_name) = input_path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            let sensor_number = file_name
+                .strip_prefix("fan")
+                .and_then(|name| name.strip_suffix("_input"))
+                .unwrap_or("?");
+            let label_path = input_path.with_file_name(format!("fan{sensor_number}_label"));
+            let sensor_label = fs::read_to_string(label_path)
+                .map(|label| label.trim().to_owned())
+                .filter(|label| !label.is_empty())
+                .unwrap_or_else(|_| format!("Fan {sensor_number}"));
+
+            fans.push(FanInfo {
+                label: format!("{chip_name} · {sensor_label}"),
+                rpm,
+            });
+        }
+    }
+
+    fans.sort_by(|a, b| a.label.cmp(&b.label));
+    fans
+}
+
+fn draw_fan_icon(ui: &mut egui::Ui, rotation: f32) {
+    let (rect, _) = ui.allocate_exact_size(egui::Vec2::splat(132.0), egui::Sense::hover());
+    let painter = ui.painter_at(rect);
+    let center = rect.center();
+
+    painter.circle_filled(center, 62.0, egui::Color32::from_rgb(31, 41, 55));
+    painter.circle_stroke(
+        center,
+        61.0,
+        egui::Stroke::new(1.5, egui::Color32::from_rgb(75, 85, 99)),
+    );
+
+    let blade_shape = [
+        egui::Vec2::new(-7.0, -9.0),
+        egui::Vec2::new(7.0, -9.0),
+        egui::Vec2::new(15.0, -39.0),
+        egui::Vec2::new(9.0, -49.0),
+        egui::Vec2::new(-5.0, -47.0),
+        egui::Vec2::new(-13.0, -34.0),
+    ];
+
+    for blade in 0..3 {
+        let angle = rotation + blade as f32 * std::f32::consts::TAU / 3.0;
+        let (sin, cos) = angle.sin_cos();
+        let points = blade_shape
+            .iter()
+            .map(|point| {
+                center + egui::Vec2::new(
+                    point.x * cos - point.y * sin,
+                    point.x * sin + point.y * cos,
+                )
+            })
+            .collect();
+        painter.add(egui::Shape::convex_polygon(
+            points,
+            egui::Color32::from_rgb(96, 165, 250),
+            egui::Stroke::new(1.0, egui::Color32::from_rgb(147, 197, 253)),
+        ));
+    }
+
+    painter.circle_filled(center, 10.0, egui::Color32::from_rgb(226, 232, 240));
+    painter.circle_filled(center, 4.0, egui::Color32::from_rgb(71, 85, 105));
 }
 
 fn tutorial_marker_path() -> Option<PathBuf> {
@@ -224,6 +339,37 @@ impl eframe::App for MonitorApp {
             _ => {}
         }
 
+        egui::SidePanel::right("fan_panel")
+            .resizable(false)
+            .default_width(205.0)
+            .show(ctx, |ui| {
+                let top_space = ((ui.available_height() - 260.0) / 2.0).max(0.0);
+                ui.add_space(top_space);
+                ui.vertical_centered(|ui| {
+                    ui.heading("Fan speed");
+                    ui.add_space(12.0);
+                    let rotation = (self.animation_started.elapsed().as_secs_f32()
+                        * std::f32::consts::TAU
+                        / 1.5)
+                        .rem_euclid(std::f32::consts::TAU);
+                    draw_fan_icon(ui, rotation);
+                    ui.add_space(12.0);
+                    if self.fans.is_empty() {
+                        ui.label("No fan sensors found");
+                        ui.add_space(4.0);
+                        ui.label("This computer or its Linux drivers may not expose fan readings.");
+                    } else {
+                        for fan in &self.fans {
+                            ui.strong(&fan.label);
+                            ui.label(format!("{} RPM", fan.rpm));
+                            ui.add_space(8.0);
+                        }
+                    }
+                    ui.add_space(8.0);
+                    ui.small("Readings refresh every second.");
+                });
+            });
+
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.heading("Linux System Monitor");
             ui.label(format!("System uptime: {}", format_uptime(self.uptime)));
@@ -269,7 +415,7 @@ impl eframe::App for MonitorApp {
             ui.label("Stats refresh every second.");
         });
 
-        ctx.request_repaint_after(Duration::from_millis(100));
+        ctx.request_repaint_after(Duration::from_millis(16));
     }
 }
 
