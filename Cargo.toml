@@ -1,8 +1,12 @@
 [package]
 name = "linuxstats"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "A desktop system monitor for Linux"
+
+[[bin]]
+name = "linuxstats"
+path = "src/main.rs"
 
 [dependencies]
 eframe = "0.31"
