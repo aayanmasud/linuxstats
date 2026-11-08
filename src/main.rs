@@ -1,5 +1,6 @@
 use std::{
     cmp::Ordering,
+    collections::HashSet,
     env, fs,
     path::PathBuf,
     time::{Duration, Instant},
@@ -111,61 +112,95 @@ impl MonitorApp {
     }
 }
 
-fn read_fan_speeds() -> Vec<FanInfo> {
-    let mut fans = Vec::new();
-    let Ok(hwmon_entries) = fs::read_dir("/sys/class/hwmon") else {
-        return fans;
+fn append_fans_from_directory(
+    directory: &std::path::Path,
+    chip_name: &str,
+    fans: &mut Vec<FanInfo>,
+    seen_paths: &mut HashSet<PathBuf>,
+) {
+    let Ok(sensor_entries) = fs::read_dir(directory) else {
+        return;
     };
 
-    for hwmon_entry in hwmon_entries.flatten() {
-        let hwmon_path = hwmon_entry.path();
-        let chip_name = fs::read_to_string(hwmon_path.join("name"))
-            .ok()
-            .map(|name| name.trim().to_owned())
-            .filter(|name| !name.is_empty())
-            .unwrap_or_else(|| "Hardware monitor".to_owned());
+    let mut sensor_paths: Vec<PathBuf> = sensor_entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .map_or(false, |name| name.starts_with("fan") && name.ends_with("_input"))
+        })
+        .collect();
+    sensor_paths.sort();
 
-        let Ok(sensor_entries) = fs::read_dir(&hwmon_path) else {
+    for input_path in sensor_paths {
+        let Ok(value) = fs::read_to_string(&input_path) else {
+            continue;
+        };
+        let Ok(rpm) = value.trim().parse::<u32>() else {
             continue;
         };
 
-        let mut sensor_paths: Vec<PathBuf> = sensor_entries
-            .flatten()
-            .map(|entry| entry.path())
-            .filter(|path| {
-                path.file_name()
-                    .and_then(|name| name.to_str())
-                    .map_or(false, |name| name.starts_with("fan") && name.ends_with("_input"))
-            })
-            .collect();
-        sensor_paths.sort();
+        let identity = fs::canonicalize(&input_path).unwrap_or_else(|_| input_path.clone());
+        if !seen_paths.insert(identity) {
+            continue;
+        }
 
-        for input_path in sensor_paths {
-            let Ok(value) = fs::read_to_string(&input_path) else {
-                continue;
-            };
-            let Ok(rpm) = value.trim().parse::<u32>() else {
-                continue;
-            };
+        let Some(file_name) = input_path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        let sensor_number = file_name
+            .strip_prefix("fan")
+            .and_then(|name| name.strip_suffix("_input"))
+            .unwrap_or("?");
+        let label_path = input_path.with_file_name(format!("fan{sensor_number}_label"));
+        let sensor_label = fs::read_to_string(label_path)
+            .ok()
+            .map(|label| label.trim().to_owned())
+            .filter(|label| !label.is_empty())
+            .unwrap_or_else(|| format!("Fan {sensor_number}"));
 
-            let Some(file_name) = input_path.file_name().and_then(|name| name.to_str()) else {
-                continue;
-            };
-            let sensor_number = file_name
-                .strip_prefix("fan")
-                .and_then(|name| name.strip_suffix("_input"))
-                .unwrap_or("?");
-            let label_path = input_path.with_file_name(format!("fan{sensor_number}_label"));
-            let sensor_label = fs::read_to_string(label_path)
+        fans.push(FanInfo {
+            label: format!("{chip_name} · {sensor_label}"),
+            rpm,
+        });
+    }
+}
+
+fn read_fan_speeds() -> Vec<FanInfo> {
+    let mut fans = Vec::new();
+    let mut seen_paths = HashSet::new();
+
+    // Standard Linux hardware-monitoring sensors.
+    if let Ok(hwmon_entries) = fs::read_dir("/sys/class/hwmon") {
+        for hwmon_entry in hwmon_entries.flatten() {
+            let hwmon_path = hwmon_entry.path();
+            let chip_name = fs::read_to_string(hwmon_path.join("name"))
                 .ok()
-                .map(|label| label.trim().to_owned())
-                .filter(|label| !label.is_empty())
-                .unwrap_or_else(|| format!("Fan {sensor_number}"));
+                .map(|name| name.trim().to_owned())
+                .filter(|name| !name.is_empty())
+                .unwrap_or_else(|| "Hardware monitor".to_owned());
+            append_fans_from_directory(&hwmon_path, &chip_name, &mut fans, &mut seen_paths);
+        }
+    }
 
-            fans.push(FanInfo {
-                label: format!("{chip_name} · {sensor_label}"),
-                rpm,
-            });
+    // Apple SMC exposes fan_input directly under applesmc platform devices on
+    // some older Macs, rather than through /sys/class/hwmon.
+    if let Ok(platform_entries) = fs::read_dir("/sys/devices/platform") {
+        for platform_entry in platform_entries.flatten() {
+            let device_path = platform_entry.path();
+            let is_applesmc = platform_entry
+                .file_name()
+                .to_str()
+                .map_or(false, |name| name.starts_with("applesmc."));
+            if is_applesmc {
+                append_fans_from_directory(
+                    &device_path,
+                    "Apple SMC",
+                    &mut fans,
+                    &mut seen_paths,
+                );
+            }
         }
     }
 
