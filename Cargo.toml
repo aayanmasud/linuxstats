@@ -19,5 +19,6 @@ depends = "$auto"
 section = "utils"
 priority = "optional"
 assets = [
+    ["target/release/linuxstats", "usr/bin/linuxstats", "755"],
     ["assets/linuxstats.desktop", "usr/share/applications/linuxstats.desktop", "644"],
 ]
