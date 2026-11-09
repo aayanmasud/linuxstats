@@ -36,6 +36,18 @@ sudo apt install ./linuxstats_*.deb
 
 If your desktop environment supports it, you can also double-click the package to install it through the system package installer.
 
+### Install on Arch / CachyOS
+
+Build and install locally from this repo:
+
+```bash
+git clone https://github.com/aayanmasud/linuxstats.git
+cd linuxstats
+makepkg -si
+```
+
+This uses the included `PKGBUILD` to compile the Rust binary and install it to `/usr/bin/linuxstats`, plus the desktop launcher entry for your app menu.
+
 ### Install from source
 
 ```bash
@@ -65,6 +77,12 @@ Build the Debian package:
 
 ```bash
 cargo deb
+```
+
+Build the Arch package locally:
+
+```bash
+makepkg -si
 ```
 
 ## Notes
