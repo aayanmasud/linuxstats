@@ -3,6 +3,9 @@ use std::{
     collections::HashSet,
     env, fs,
     path::{Path, PathBuf},
+    process::Command,
+    sync::mpsc::{self, Receiver},
+    thread,
     time::{Duration, Instant},
 };
 
@@ -10,8 +13,8 @@ use eframe::egui;
 use sysinfo::{Disks, System};
 
 const HIGH_FAN_RPM_WARNING: u32 = 6_200;
-const CARD_BG: egui::Color32 = egui::Color32::from_rgb(25, 33, 48);
-const MUTED: egui::Color32 = egui::Color32::from_rgb(160, 174, 192);
+const LATEST_RELEASE_API: &str = "https://api.github.com/repos/aayanmasud/linuxstats/releases/latest";
+const RELEASES_PAGE: &str = "https://github.com/aayanmasud/linuxstats/releases/latest";
 
 struct ProcessInfo {
     pid: u32,
@@ -37,11 +40,20 @@ struct MonitorApp {
     last_animation_update: Instant,
     fan_rotation: f32,
     tutorial_step: Option<usize>,
+    update_rx: Receiver<bool>,
+    update_available: bool,
+    update_dismissed: bool,
 }
 
 impl MonitorApp {
     fn new() -> Self {
         let now = Instant::now();
+        let (update_tx, update_rx) = mpsc::channel();
+        thread::spawn(move || {
+            let is_available = check_for_update();
+            let _ = update_tx.send(is_available);
+        });
+
         let mut app = Self {
             sys: System::new_all().expect("Could not read system information"),
             cpu_percent: 0.0,
@@ -54,6 +66,9 @@ impl MonitorApp {
             last_animation_update: now,
             fan_rotation: 0.0,
             tutorial_step: if tutorial_is_completed() { None } else { Some(0) },
+            update_rx,
+            update_available: false,
+            update_dismissed: false,
         };
         app.refresh_stats();
         app
@@ -111,6 +126,48 @@ impl MonitorApp {
 
     fn max_fan_rpm(&self) -> u32 {
         self.fans.iter().map(|fan| fan.rpm).max().unwrap_or(0)
+    }
+}
+
+fn check_for_update() -> bool {
+    // Use curl for HTTPS so the application does not need another Rust dependency.
+    // If curl is unavailable or the network request fails, simply skip the check.
+    let Ok(response) = Command::new("curl")
+        .args([
+            "--fail", "--silent", "--show-error", "--location", "--max-time", "8",
+            "--user-agent", "linuxstats", LATEST_RELEASE_API,
+        ])
+        .output()
+    else {
+        return false;
+    };
+    if !response.status.success() {
+        return false;
+    }
+
+    let body = String::from_utf8_lossy(&response.stdout);
+    let Some(tag) = body.split_once("\"tag_name\"")
+        .and_then(|(_, rest)| rest.split_once(':'))
+        .and_then(|(_, rest)| rest.trim_start().strip_prefix('"'))
+        .and_then(|rest| rest.split_once('"').map(|(tag, _)| tag))
+    else {
+        return false;
+    };
+
+    version_is_newer(tag, env!("CARGO_PKG_VERSION"))
+}
+
+fn version_is_newer(latest: &str, current: &str) -> bool {
+    let parse = |version: &str| -> Option<Vec<u64>> {
+        version
+            .trim_start_matches('v')
+            .split('.')
+            .map(|part| part.parse::<u64>().ok())
+            .collect()
+    };
+    match (parse(latest), parse(current)) {
+        (Some(latest), Some(current)) => latest > current,
+        _ => false,
     }
 }
 
@@ -182,15 +239,15 @@ fn read_fan_speeds() -> Vec<FanInfo> {
 }
 
 fn draw_fan_icon(ui: &mut egui::Ui, rotation: f32) {
-    let (rect, _) = ui.allocate_exact_size(egui::Vec2::splat(72.0), egui::Sense::hover());
+    let (rect, _) = ui.allocate_exact_size(egui::Vec2::splat(132.0), egui::Sense::hover());
     let painter = ui.painter_at(rect);
     let center = rect.center();
-    painter.circle_filled(center, 34.0, egui::Color32::from_rgb(31, 41, 55));
-    painter.circle_stroke(center, 33.0, egui::Stroke::new(1.5, egui::Color32::from_rgb(75, 85, 99)));
+    painter.circle_filled(center, 62.0, egui::Color32::from_rgb(31, 41, 55));
+    painter.circle_stroke(center, 61.0, egui::Stroke::new(1.5, egui::Color32::from_rgb(75, 85, 99)));
     let blade_shape = [
-        egui::Vec2::new(-4.0, -5.0), egui::Vec2::new(4.0, -5.0),
-        egui::Vec2::new(9.0, -21.0), egui::Vec2::new(5.0, -27.0),
-        egui::Vec2::new(-3.0, -26.0), egui::Vec2::new(-7.0, -18.0),
+        egui::Vec2::new(-7.0, -9.0), egui::Vec2::new(7.0, -9.0),
+        egui::Vec2::new(15.0, -39.0), egui::Vec2::new(9.0, -49.0),
+        egui::Vec2::new(-5.0, -47.0), egui::Vec2::new(-13.0, -34.0),
     ];
     for blade in 0..3 {
         let angle = rotation + blade as f32 * std::f32::consts::TAU / 3.0;
@@ -204,7 +261,8 @@ fn draw_fan_icon(ui: &mut egui::Ui, rotation: f32) {
             egui::Stroke::new(1.0, egui::Color32::from_rgb(147, 197, 253)),
         ));
     }
-    painter.circle_filled(center, 6.0, egui::Color32::from_rgb(226, 232, 240));
+    painter.circle_filled(center, 10.0, egui::Color32::from_rgb(226, 232, 240));
+    painter.circle_filled(center, 4.0, egui::Color32::from_rgb(71, 85, 105));
 }
 
 fn tutorial_marker_path() -> Option<PathBuf> {
@@ -234,28 +292,17 @@ fn format_uptime(seconds: u64) -> String {
     format!("{days}d {hours}h {minutes}m")
 }
 
-fn metric_card(ui: &mut egui::Ui, title: &str, value: f32, color: egui::Color32, hint: &str) {
-    egui::Frame::group(ui.style())
-        .fill(CARD_BG)
-        .inner_margin(12.0)
-        .show(ui, |ui| {
-            ui.set_min_width(120.0);
-            ui.label(egui::RichText::new(title).color(MUTED).size(13.0));
-            ui.add_space(4.0);
-            ui.label(egui::RichText::new(format!("{value:.1}%")).size(25.0).strong());
-            ui.add(egui::ProgressBar::new(value / 100.0).fill(color).desired_height(8.0));
-            ui.add_space(4.0);
-            ui.label(egui::RichText::new(hint).color(MUTED).small());
-        });
-}
-
-fn section_heading(ui: &mut egui::Ui, title: &str, subtitle: &str) {
-    ui.heading(title);
-    ui.label(egui::RichText::new(subtitle).color(MUTED));
+fn stat_row(ui: &mut egui::Ui, label: &str, percent: f32) {
+    ui.label(label);
+    ui.add(egui::ProgressBar::new(percent / 100.0).text(format!("{percent:.1}%")));
+    ui.end_row();
 }
 
 impl eframe::App for MonitorApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if let Ok(update_available) = self.update_rx.try_recv() {
+            self.update_available = update_available;
+        }
         if self.last_update.elapsed() >= Duration::from_secs(1) {
             self.refresh_stats();
             self.last_update = Instant::now();
@@ -269,31 +316,32 @@ impl eframe::App for MonitorApp {
             + elapsed * std::f32::consts::TAU * fan_rpm as f32 / 3000.0)
             .rem_euclid(std::f32::consts::TAU);
         let high_fan_speed = fan_rpm >= HIGH_FAN_RPM_WARNING;
+        let busiest_process = self.processes.first();
 
         let mut tutorial_action = None;
         if let Some(step) = self.tutorial_step {
             let (title, description) = match step {
-                0 => ("Welcome to Linuxstats", "Your simple overview of live system health. This tour explains the main readings."),
-                1 => ("CPU, memory, and disk", "Each card shows the percentage currently in use. The bars make it easy to compare at a glance."),
-                2 => ("Top processes", "See which running apps use the most CPU. Memory is shown as a percentage of your system's total RAM."),
-                _ => ("You're ready to go", "Readings update automatically every second. Fan readings appear when your hardware exposes them."),
+                0 => ("Welcome to Linux System Monitor", "This quick tour shows you how to read your system's live CPU, memory, disk, and process information."),
+                1 => ("System usage", "The CPU, Memory, and Disk bars show the percentage currently in use. System uptime shows how long your computer has been running."),
+                2 => ("Top processes", "This table lists up to ten processes, sorted by CPU use. It also shows each process's memory use and process ID (PID)."),
+                _ => ("You're ready to go", "Statistics refresh automatically every second. You can close this window whenever you're done monitoring your system."),
             };
-            egui::Window::new("Quick tour")
+            egui::Window::new("Quick tutorial")
                 .collapsible(false).resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
                 .show(ctx, |ui| {
-                    ui.set_min_width(320.0);
                     ui.heading(title);
                     ui.add_space(8.0);
                     ui.label(description);
                     ui.add_space(12.0);
                     ui.horizontal(|ui| {
-                        if ui.button("Skip tour").clicked() { tutorial_action = Some("skip"); }
+                        if ui.button("Skip tutorial").clicked() { tutorial_action = Some("skip"); }
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if ui.button(if step == 3 { "Finish" } else { "Next" }).clicked() { tutorial_action = Some("next"); }
                             if step > 0 && ui.button("Back").clicked() { tutorial_action = Some("back"); }
                         });
                     });
+                    ui.add_space(4.0);
                     ui.label(format!("Step {} of 4", step + 1));
                 });
         }
@@ -307,101 +355,92 @@ impl eframe::App for MonitorApp {
             _ => {}
         }
 
+        egui::TopBottomPanel::top("update_notice").show_animated(ctx, self.update_available && !self.update_dismissed, |ui| {
+            egui::Frame::group(ui.style())
+                .fill(egui::Color32::from_rgb(55, 42, 18))
+                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(245, 158, 11)))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new("Your app has to update to the latest version!").strong().color(egui::Color32::from_rgb(253, 230, 138)));
+                        ui.hyperlink_to("Download latest version", RELEASES_PAGE);
+                        if ui.small_button("Later").clicked() { self.update_dismissed = true; }
+                    });
+                });
+        });
+
+        egui::SidePanel::right("fan_panel").resizable(false).default_width(235.0).show(ctx, |ui| {
+            let top_space = ((ui.available_height() - 300.0) / 2.0).max(0.0);
+            ui.add_space(top_space);
+            ui.vertical_centered(|ui| {
+                ui.heading("Fan speed");
+                ui.add_space(12.0);
+                draw_fan_icon(ui, self.fan_rotation);
+                ui.add_space(12.0);
+                if self.fans.is_empty() {
+                    ui.label("No fan sensors found");
+                    ui.add_space(4.0);
+                    ui.label("This computer or its Linux drivers may not expose fan readings.");
+                } else {
+                    for fan in &self.fans {
+                        ui.strong(&fan.label);
+                        ui.label(format!("{} RPM", fan.rpm));
+                        ui.add_space(8.0);
+                    }
+                }
+                if high_fan_speed {
+                    ui.add_space(8.0);
+                    egui::Frame::group(ui.style())
+                        .fill(egui::Color32::from_rgb(75, 38, 20))
+                        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(249, 115, 22)))
+                        .show(ui, |ui| {
+                            ui.colored_label(egui::Color32::from_rgb(253, 186, 116), "⚠ High fan speed");
+                            ui.label(format!("Fan is at {fan_rpm} RPM."));
+                            if let Some(process) = busiest_process {
+                                ui.label(format!("Highest CPU use: {} ({:.1}%).", process.name, process.cpu));
+                                ui.label("Highlighted in the task list as a possible contributor—not a confirmed cause.");
+                            } else {
+                                ui.label("High system load or heat may be involved; no process data is available.");
+                            }
+                        });
+                }
+                ui.add_space(8.0);
+                ui.small("Readings refresh every second.");
+            });
+        });
+
         egui::CentralPanel::default().show(ctx, |ui| {
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                ui.add_space(8.0);
-                ui.horizontal(|ui| {
-                    ui.vertical(|ui| {
-                        ui.heading(egui::RichText::new("Linuxstats").size(28.0).strong());
-                        ui.label(egui::RichText::new("A clear snapshot of your system").color(MUTED));
-                    });
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        egui::Frame::group(ui.style()).fill(CARD_BG).inner_margin(10.0).show(ui, |ui| {
-                            ui.label(egui::RichText::new("RUNNING FOR").color(MUTED).small());
-                            ui.label(egui::RichText::new(format_uptime(self.uptime)).strong());
-                        });
-                    });
-                });
-
-                ui.add_space(22.0);
-                section_heading(ui, "System overview", "Current usage · refreshes every second");
-                ui.add_space(10.0);
-                ui.columns(3, |columns| {
-                    metric_card(&mut columns[0], "PROCESSOR", self.cpu_percent, egui::Color32::from_rgb(96, 165, 250), "CPU usage");
-                    metric_card(&mut columns[1], "MEMORY", self.ram_percent, egui::Color32::from_rgb(167, 139, 250), "RAM in use");
-                    metric_card(&mut columns[2], "STORAGE", self.disk_percent, egui::Color32::from_rgb(52, 211, 153), "Disk space used");
-                });
-
-                ui.add_space(24.0);
-                ui.horizontal(|ui| {
-                    section_heading(ui, "Top processes", "Apps currently using the most CPU");
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(egui::RichText::new("TOP 10").color(MUTED).small());
-                    });
-                });
-                ui.add_space(8.0);
-                egui::Frame::group(ui.style()).fill(CARD_BG).inner_margin(10.0).show(ui, |ui| {
-                    if self.processes.is_empty() {
-                        ui.label("No process information is available yet.");
-                    } else {
-                        egui::ScrollArea::horizontal().show(ui, |ui| {
-                            egui::Grid::new("process_table")
-                                .striped(true)
-                                .num_columns(4)
-                                .spacing([18.0, 8.0])
-                                .show(ui, |ui| {
-                                    ui.strong("Process");
-                                    ui.strong("PID");
-                                    ui.strong("CPU");
-                                    ui.strong("Memory");
-                                    ui.end_row();
-                                    for (index, process) in self.processes.iter().enumerate() {
-                                        let highlighted = high_fan_speed && index == 0;
-                                        let name = if highlighted { format!("⚠ {}", process.name) } else { process.name.clone() };
-                                        ui.label(name);
-                                        ui.label(process.pid.to_string());
-                                        ui.label(format!("{:.1}%", process.cpu));
-                                        ui.label(format!("{:.1}%", process.memory));
-                                        ui.end_row();
-                                    }
-                                });
-                        });
+            ui.heading("Linux System Monitor");
+            ui.label(format!("System uptime: {}", format_uptime(self.uptime)));
+            ui.add_space(12.0);
+            egui::Grid::new("system_stats").num_columns(2).spacing([16.0, 10.0]).show(ui, |ui| {
+                stat_row(ui, "CPU", self.cpu_percent);
+                stat_row(ui, "Memory", self.ram_percent);
+                stat_row(ui, "Disk", self.disk_percent);
+            });
+            ui.add_space(16.0);
+            ui.heading("Top Processes");
+            ui.add_space(6.0);
+            if high_fan_speed {
+                ui.colored_label(egui::Color32::from_rgb(249, 115, 22), "⚠ High CPU process highlighted; it may contribute to heat, but this is not proof of cause.");
+                ui.add_space(4.0);
+            }
+            egui::ScrollArea::vertical().max_height(350.0).show(ui, |ui| {
+                egui::Grid::new("process_table").striped(true).num_columns(5).show(ui, |ui| {
+                    ui.strong(""); ui.strong("PID"); ui.strong("Name"); ui.strong("CPU %"); ui.strong("Memory %"); ui.end_row();
+                    for (index, process) in self.processes.iter().enumerate() {
+                        let highlight = high_fan_speed && index == 0;
+                        let color = if highlight { egui::Color32::from_rgb(253, 186, 116) } else { ui.visuals().text_color() };
+                        if highlight { ui.colored_label(color, "⚠"); } else { ui.label(""); }
+                        ui.colored_label(color, process.pid.to_string());
+                        ui.colored_label(color, &process.name);
+                        ui.colored_label(color, format!("{:.1}", process.cpu));
+                        ui.colored_label(color, format!("{:.1}", process.memory));
+                        ui.end_row();
                     }
                 });
-
-                ui.add_space(24.0);
-                section_heading(ui, "Cooling", "Fan readings depend on your computer's hardware and drivers");
-                ui.add_space(8.0);
-                egui::Frame::group(ui.style()).fill(CARD_BG).inner_margin(12.0).show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        draw_fan_icon(ui, self.fan_rotation);
-                        ui.add_space(8.0);
-                        ui.vertical(|ui| {
-                            if self.fans.is_empty() {
-                                ui.label(egui::RichText::new("No fan sensors detected").strong());
-                                ui.label(egui::RichText::new("Your system may not expose fan speeds to Linux.").color(MUTED));
-                            } else {
-                                for fan in &self.fans {
-                                    ui.horizontal(|ui| {
-                                        ui.label(egui::RichText::new(&fan.label).strong());
-                                        ui.label(format!("{} RPM", fan.rpm));
-                                    });
-                                }
-                            }
-                            if high_fan_speed {
-                                ui.add_space(4.0);
-                                ui.colored_label(egui::Color32::from_rgb(253, 186, 116), format!("High fan speed: {fan_rpm} RPM"));
-                                ui.label(egui::RichText::new("This is an advisory reading, not a diagnosis.").color(MUTED).small());
-                            }
-                        });
-                    });
-                });
-                ui.add_space(12.0);
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(egui::RichText::new("Updated automatically every second").color(MUTED).small());
-                });
-                ui.add_space(12.0);
             });
+            ui.add_space(12.0);
+            ui.label("Stats refresh every second.");
         });
 
         ctx.request_repaint_after(Duration::from_millis(100));
@@ -410,14 +449,8 @@ impl eframe::App for MonitorApp {
 
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size([960.0, 760.0])
-            .with_min_inner_size([540.0, 600.0]),
+        viewport: egui::ViewportBuilder::default().with_inner_size([900.0, 600.0]).with_min_inner_size([600.0, 400.0]),
         ..Default::default()
     };
-    eframe::run_native(
-        "Linuxstats",
-        options,
-        Box::new(|_creation_context| Ok(Box::new(MonitorApp::new()))),
-    )
+    eframe::run_native("Linux System Monitor", options, Box::new(|_creation_context| Ok(Box::new(MonitorApp::new()))))
 }
