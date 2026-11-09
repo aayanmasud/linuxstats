@@ -1,5 +1,7 @@
 # Linuxstats
 
+**Available on:** Arch Linux, CachyOS, and Hyprland
+
 Linuxstats is a lightweight desktop system monitor for Linux. It shows live CPU, memory, and disk usage, the top processes, and fan speed readings when the system exposes them.
 
 ## Features
