@@ -10,7 +10,7 @@ use std::{
 };
 
 use eframe::egui;
-use sysinfo::{Disks, System};
+use sysinfo::{get_current_pid, Disks, Pid, Signal, System};
 
 const HIGH_FAN_RPM_WARNING: u32 = 6_200;
 const LATEST_RELEASE_API: &str = "https://api.github.com/repos/aayanmasud/linuxstats/releases/latest";
@@ -23,6 +23,43 @@ const EFFICIENT_FAN_REFRESH_INTERVAL: Duration = Duration::from_secs(20);
 const EFFICIENT_DISK_REFRESH_INTERVAL: Duration = Duration::from_secs(120);
 const CARD_BG: egui::Color32 = egui::Color32::from_rgb(28, 37, 53);
 const MUTED: egui::Color32 = egui::Color32::from_rgb(160, 174, 192);
+
+#[derive(Clone, Copy)]
+enum ProcessAction {
+    Terminate,
+    Kill,
+    Stop,
+    Continue,
+}
+
+impl ProcessAction {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Terminate => "Terminate (graceful)",
+            Self::Kill => "Kill (force)",
+            Self::Stop => "Stop (pause)",
+            Self::Continue => "Continue (resume)",
+        }
+    }
+
+    fn signal(self) -> Signal {
+        match self {
+            Self::Terminate => Signal::Term,
+            Self::Kill => Signal::Kill,
+            Self::Stop => Signal::Stop,
+            Self::Continue => Signal::Cont,
+        }
+    }
+
+    fn warning(self) -> &'static str {
+        match self {
+            Self::Terminate => "The process will be asked to exit and may lose unsaved work.",
+            Self::Kill => "This forcefully ends the process immediately. Unsaved work will be lost.",
+            Self::Stop => "The process will be paused until you choose Continue or another program resumes it.",
+            Self::Continue => "The paused process will resume running.",
+        }
+    }
+}
 
 struct ProcessInfo {
     pid: u32,
@@ -48,6 +85,8 @@ struct MonitorApp {
     last_fan_update: Instant,
     last_disk_update: Instant,
     efficiency_mode: bool,
+    pending_action: Option<(u32, String, ProcessAction)>,
+    action_status: Option<String>,
     tutorial_step: Option<usize>,
     update_rx: Receiver<bool>,
     update_available: bool,
@@ -75,6 +114,8 @@ impl MonitorApp {
             last_fan_update: now,
             last_disk_update: now,
             efficiency_mode: false,
+            pending_action: None,
+            action_status: None,
             tutorial_step: if tutorial_is_completed() { None } else { Some(0) },
             update_rx,
             update_available: false,
@@ -146,10 +187,33 @@ impl MonitorApp {
     fn max_fan_rpm(&self) -> u32 {
         self.fans.iter().map(|fan| fan.rpm).max().unwrap_or(0)
     }
+
+    fn perform_process_action(&mut self, pid: u32, name: &str, action: ProcessAction) {
+        // Never allow this UI to signal PID 1 or itself. The OS still enforces user permissions.
+        if pid <= 1 || get_current_pid().ok() == Some(Pid::from_u32(pid)) {
+            self.action_status = Some("For safety, actions on PID 1 and Linuxstats itself are disabled.".to_owned());
+            return;
+        }
+        let Some(process) = self.sys.process(Pid::from_u32(pid)) else {
+            self.action_status = Some(format!("Process {pid} no longer exists; refresh and try again."));
+            return;
+        };
+        match process.kill_with(action.signal()) {
+            Some(true) => {
+                self.action_status = Some(format!("{} signal sent to {name} (PID {pid}).", action.label()));
+                self.last_update = Instant::now() - SYSTEM_REFRESH_INTERVAL;
+            }
+            Some(false) => {
+                self.action_status = Some(format!("Could not send a signal to {name} (PID {pid}); permission may be denied."));
+            }
+            None => {
+                self.action_status = Some("This platform does not support that process signal.".to_owned());
+            }
+        }
+    }
 }
 
 fn check_for_update() -> bool {
-    // Network checks run off the UI thread; failures are intentionally silent.
     let Ok(response) = Command::new("curl")
         .args([
             "--fail", "--silent", "--show-error", "--location", "--max-time", "8",
@@ -307,15 +371,9 @@ impl eframe::App for MonitorApp {
         let system_interval = if self.efficiency_mode { EFFICIENT_SYSTEM_REFRESH_INTERVAL } else { SYSTEM_REFRESH_INTERVAL };
         let fan_interval = if self.efficiency_mode { EFFICIENT_FAN_REFRESH_INTERVAL } else { FAN_REFRESH_INTERVAL };
         let disk_interval = if self.efficiency_mode { EFFICIENT_DISK_REFRESH_INTERVAL } else { DISK_REFRESH_INTERVAL };
-        if self.last_update.elapsed() >= system_interval {
-            self.refresh_system_stats();
-        }
-        if self.last_fan_update.elapsed() >= fan_interval {
-            self.refresh_fans();
-        }
-        if self.last_disk_update.elapsed() >= disk_interval {
-            self.refresh_disk_stats();
-        }
+        if self.last_update.elapsed() >= system_interval { self.refresh_system_stats(); }
+        if self.last_fan_update.elapsed() >= fan_interval { self.refresh_fans(); }
+        if self.last_disk_update.elapsed() >= disk_interval { self.refresh_disk_stats(); }
 
         let fan_rpm = self.max_fan_rpm();
         let high_fan_speed = fan_rpm >= HIGH_FAN_RPM_WARNING;
@@ -326,7 +384,7 @@ impl eframe::App for MonitorApp {
             let (title, description) = match step {
                 0 => ("Welcome to Linux System Monitor", "This quick tour shows you how to read your system's live CPU, memory, disk, and process information."),
                 1 => ("System usage", "The CPU, Memory, and Disk cards show the percentage currently in use. System uptime shows how long your computer has been running."),
-                2 => ("Top processes", "This table lists up to ten processes, sorted by CPU use. Memory is shown as a percentage of total RAM."),
+                2 => ("Top processes", "Right-click a process for actions. Signals may be denied if you do not own that process."),
                 _ => ("You're ready to go", "Statistics refresh automatically. Fan readings appear when your system exposes them."),
             };
             egui::Window::new("Quick tutorial").collapsible(false).resizable(false)
@@ -368,6 +426,7 @@ impl eframe::App for MonitorApp {
                 });
         });
 
+        let mut requested_action: Option<(u32, String, ProcessAction)> = None;
         egui::CentralPanel::default().show(ctx, |ui| {
             egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
                 ui.add_space(8.0);
@@ -388,7 +447,6 @@ impl eframe::App for MonitorApp {
                 ui.horizontal_wrapped(|ui| {
                     let label = if self.efficiency_mode { "Efficiency mode: on" } else { "Efficiency mode: off" };
                     if ui.toggle_value(&mut self.efficiency_mode, label).changed() {
-                        // Apply the selected cadence immediately rather than waiting on the old interval.
                         self.last_update = Instant::now();
                         self.last_fan_update = Instant::now();
                         self.last_disk_update = Instant::now();
@@ -401,12 +459,8 @@ impl eframe::App for MonitorApp {
                 });
 
                 ui.add_space(16.0);
-                ui.horizontal(|ui| {
-                    ui.vertical(|ui| {
-                        ui.heading("System overview");
-                        ui.label(egui::RichText::new(if self.efficiency_mode { "Efficiency mode · less frequent updates" } else { "Live usage · updates every 2 seconds" }).color(MUTED));
-                    });
-                });
+                ui.heading("System overview");
+                ui.label(egui::RichText::new(if self.efficiency_mode { "Efficiency mode · less frequent updates" } else { "Live usage · updates every 2 seconds" }).color(MUTED));
                 ui.add_space(10.0);
                 ui.columns(3, |columns| {
                     metric_card(&mut columns[0], "PROCESSOR", self.cpu_percent, egui::Color32::from_rgb(96, 165, 250), "CPU in use");
@@ -416,10 +470,17 @@ impl eframe::App for MonitorApp {
 
                 ui.add_space(22.0);
                 ui.heading("Top processes");
-                ui.label(egui::RichText::new("Applications using the most CPU right now").color(MUTED));
+                ui.label(egui::RichText::new("Right-click a process to manage it. Actions are confirmed before a signal is sent.").color(MUTED));
                 if high_fan_speed {
                     ui.add_space(6.0);
                     ui.colored_label(egui::Color32::from_rgb(253, 186, 116), "High fan speed detected; the top process is only a possible contributor.");
+                }
+                if let Some(status) = &self.action_status {
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        ui.label(status);
+                        if ui.small_button("Dismiss").clicked() { self.action_status = None; }
+                    });
                 }
                 ui.add_space(8.0);
                 egui::Frame::group(ui.style()).fill(CARD_BG).inner_margin(10.0).show(ui, |ui| {
@@ -432,11 +493,23 @@ impl eframe::App for MonitorApp {
                             for (index, process) in self.processes.iter().enumerate() {
                                 let is_top = high_fan_speed && index == 0;
                                 let name = if is_top { format!("⚠ {}", process.name) } else { process.name.clone() };
-                                if is_top {
-                                    ui.colored_label(egui::Color32::from_rgb(253, 186, 116), name);
+                                let response = if is_top {
+                                    ui.colored_label(egui::Color32::from_rgb(253, 186, 116), name)
                                 } else {
-                                    ui.label(name);
-                                }
+                                    ui.label(name)
+                                };
+                                let pid = process.pid;
+                                let process_name = process.name.clone();
+                                response.context_menu(|ui| {
+                                    ui.label(egui::RichText::new(format!("{} · PID {pid}", process_name)).strong());
+                                    ui.separator();
+                                    for action in [ProcessAction::Terminate, ProcessAction::Kill, ProcessAction::Stop, ProcessAction::Continue] {
+                                        if ui.button(action.label()).clicked() {
+                                            requested_action = Some((pid, process_name.clone(), action));
+                                            ui.close_menu();
+                                        }
+                                    }
+                                });
                                 ui.label(process.pid.to_string());
                                 ui.label(format!("{:.1}%", process.cpu));
                                 ui.label(format!("{:.1}%", process.memory));
@@ -484,8 +557,39 @@ impl eframe::App for MonitorApp {
                 ui.add_space(12.0);
             });
         });
+        if let Some(action) = requested_action {
+            self.pending_action = Some(action);
+            self.action_status = None;
+        }
 
-        // Idle redraw cadence also slows in efficiency mode; UI input still triggers immediate frames.
+        let mut confirm = false;
+        let mut cancel = false;
+        if let Some((pid, ref name, action)) = self.pending_action {
+            egui::Window::new("Confirm process action")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+                .show(ctx, |ui| {
+                    ui.set_min_width(330.0);
+                    ui.label(format!("{} · PID {pid}", name));
+                    ui.add_space(8.0);
+                    ui.label(action.warning());
+                    ui.add_space(12.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("Cancel").clicked() { cancel = true; }
+                        let button = if matches!(action, ProcessAction::Kill) { "Force kill" } else { "Confirm" };
+                        if ui.button(button).clicked() { confirm = true; }
+                    });
+                });
+        }
+        if confirm {
+            if let Some((pid, name, action)) = self.pending_action.take() {
+                self.perform_process_action(pid, &name, action);
+            }
+        } else if cancel {
+            self.pending_action = None;
+        }
+
         ctx.request_repaint_after(if self.efficiency_mode { Duration::from_secs(4) } else { Duration::from_secs(1) });
     }
 }
