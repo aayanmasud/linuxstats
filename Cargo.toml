@@ -21,4 +21,5 @@ priority = "optional"
 assets = [
     ["target/release/linuxstats", "usr/bin/linuxstats", "755"],
     ["assets/linuxstats.desktop", "usr/share/applications/linuxstats.desktop", "644"],
+    ["assets/linuxstats.svg", "usr/share/icons/hicolor/scalable/apps/linuxstats.svg", "644"],
 ]

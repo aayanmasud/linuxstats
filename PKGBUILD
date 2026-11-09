@@ -25,4 +25,5 @@ package() {
   cd "$srcdir/${pkgname}-${pkgver}"
   install -Dm755 "target/release/linuxstats" "$pkgdir/usr/bin/linuxstats"
   install -Dm644 "assets/linuxstats.desktop" "$pkgdir/usr/share/applications/linuxstats.desktop"
+  install -Dm644 "assets/linuxstats.svg" "$pkgdir/usr/share/icons/hicolor/scalable/apps/linuxstats.svg"
 }
