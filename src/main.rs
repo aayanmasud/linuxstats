@@ -18,6 +18,9 @@ const RELEASES_PAGE: &str = "https://github.com/aayanmasud/linuxstats/releases/l
 const SYSTEM_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 const FAN_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 const DISK_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
+const EFFICIENT_SYSTEM_REFRESH_INTERVAL: Duration = Duration::from_secs(8);
+const EFFICIENT_FAN_REFRESH_INTERVAL: Duration = Duration::from_secs(20);
+const EFFICIENT_DISK_REFRESH_INTERVAL: Duration = Duration::from_secs(120);
 const CARD_BG: egui::Color32 = egui::Color32::from_rgb(28, 37, 53);
 const MUTED: egui::Color32 = egui::Color32::from_rgb(160, 174, 192);
 
@@ -44,6 +47,7 @@ struct MonitorApp {
     last_update: Instant,
     last_fan_update: Instant,
     last_disk_update: Instant,
+    efficiency_mode: bool,
     tutorial_step: Option<usize>,
     update_rx: Receiver<bool>,
     update_available: bool,
@@ -70,6 +74,7 @@ impl MonitorApp {
             last_update: now,
             last_fan_update: now,
             last_disk_update: now,
+            efficiency_mode: false,
             tutorial_step: if tutorial_is_completed() { None } else { Some(0) },
             update_rx,
             update_available: false,
@@ -298,13 +303,17 @@ impl eframe::App for MonitorApp {
         if let Ok(update_available) = self.update_rx.try_recv() {
             self.update_available = update_available;
         }
-        if self.last_update.elapsed() >= SYSTEM_REFRESH_INTERVAL {
+
+        let system_interval = if self.efficiency_mode { EFFICIENT_SYSTEM_REFRESH_INTERVAL } else { SYSTEM_REFRESH_INTERVAL };
+        let fan_interval = if self.efficiency_mode { EFFICIENT_FAN_REFRESH_INTERVAL } else { FAN_REFRESH_INTERVAL };
+        let disk_interval = if self.efficiency_mode { EFFICIENT_DISK_REFRESH_INTERVAL } else { DISK_REFRESH_INTERVAL };
+        if self.last_update.elapsed() >= system_interval {
             self.refresh_system_stats();
         }
-        if self.last_fan_update.elapsed() >= FAN_REFRESH_INTERVAL {
+        if self.last_fan_update.elapsed() >= fan_interval {
             self.refresh_fans();
         }
-        if self.last_disk_update.elapsed() >= DISK_REFRESH_INTERVAL {
+        if self.last_disk_update.elapsed() >= disk_interval {
             self.refresh_disk_stats();
         }
 
@@ -375,11 +384,27 @@ impl eframe::App for MonitorApp {
                     });
                 });
 
-                ui.add_space(20.0);
+                ui.add_space(12.0);
+                ui.horizontal_wrapped(|ui| {
+                    let label = if self.efficiency_mode { "Efficiency mode: on" } else { "Efficiency mode: off" };
+                    if ui.toggle_value(&mut self.efficiency_mode, label).changed() {
+                        // Apply the selected cadence immediately rather than waiting on the old interval.
+                        self.last_update = Instant::now();
+                        self.last_fan_update = Instant::now();
+                        self.last_disk_update = Instant::now();
+                    }
+                    ui.label(egui::RichText::new(if self.efficiency_mode {
+                        "Lower activity: system every 8s, fans every 20s, storage every 2 min."
+                    } else {
+                        "Standard monitoring: system every 2s, fans every 5s, storage every 30s."
+                    }).color(MUTED).small());
+                });
+
+                ui.add_space(16.0);
                 ui.horizontal(|ui| {
                     ui.vertical(|ui| {
                         ui.heading("System overview");
-                        ui.label(egui::RichText::new("Live usage · updates every 2 seconds").color(MUTED));
+                        ui.label(egui::RichText::new(if self.efficiency_mode { "Efficiency mode · less frequent updates" } else { "Live usage · updates every 2 seconds" }).color(MUTED));
                     });
                 });
                 ui.add_space(10.0);
@@ -454,14 +479,14 @@ impl eframe::App for MonitorApp {
 
                 ui.add_space(12.0);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(egui::RichText::new("System · fan · storage data refresh at different intervals to keep the app responsive").color(MUTED).small());
+                    ui.label(egui::RichText::new("Background polling slows in efficiency mode; the dashboard stays available.").color(MUTED).small());
                 });
                 ui.add_space(12.0);
             });
         });
 
-        // The dashboard redraws only when data is due or the user interacts; no continuous fan animation.
-        ctx.request_repaint_after(Duration::from_secs(1));
+        // Idle redraw cadence also slows in efficiency mode; UI input still triggers immediate frames.
+        ctx.request_repaint_after(if self.efficiency_mode { Duration::from_secs(4) } else { Duration::from_secs(1) });
     }
 }
 
