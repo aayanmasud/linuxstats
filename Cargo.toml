@@ -13,7 +13,7 @@ eframe = "0.31"
 sysinfo = "0.40"
 
 [package.metadata.deb]
-maintainer = "Your Name <aayanmasud@outlook.com>"
+maintainer = "aayanmasud1@outlook.com"
 copyright = "2026, Aayan Masud"
 depends = "$auto"
 section = "utils"

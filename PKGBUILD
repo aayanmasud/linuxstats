@@ -1,4 +1,4 @@
-# Maintainer: Aayan Masud <aayanmasud@outlook.com>
+# Maintainer: aayanmasud1@outlook.com
 pkgname=linuxstats
 pkgver=0.1.2
 pkgrel=1
