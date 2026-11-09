@@ -15,7 +15,7 @@ Linuxstats is a lightweight desktop system monitor for Linux. It shows live CPU,
 
 ## Preview
 
-<img width="1050" height="700" alt="preview" src="https://github.com/user-attachments/assets/cad5fc87-1c51-4ed4-879e-ed80bddb0863" />
+<img width="1050" height="762" alt="quickshot_261109_181716" src="https://github.com/user-attachments/assets/60bfa494-1c32-48f3-9e05-c2c4312262ab" />
 
 ## Requirements
 
