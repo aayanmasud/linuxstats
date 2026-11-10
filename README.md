@@ -28,7 +28,7 @@ Linuxstats is a lightweight desktop system monitor for Linux. It shows live CPU,
 ### Install from GitHub Releases
 
 1. Go to the Releases page:
-   https://github.com/aayanmasud/linuxstats/releases
+   https://github.com/modenlaggard/linuxstats/releases
 2. Download the latest `.deb` package.
 3. Install it:
 
@@ -53,7 +53,7 @@ This uses the included `PKGBUILD` to compile the Rust binary and install it to `
 ### Install from source
 
 ```bash
-git clone https://github.com/aayanmasud/linuxstats.git
+git clone https://github.com/modenlaggard/linuxstats.git
 cd linuxstats
 cargo run
 ```
