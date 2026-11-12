@@ -14,7 +14,7 @@ sysinfo = "0.40"
 
 [package.metadata.deb]
 maintainer = "aayanmasud1@outlook.com"
-copyright = "2026, Aayan Masud"
+copyright = "2026, Moden Laggard"
 depends = "$auto"
 section = "utils"
 priority = "optional"
