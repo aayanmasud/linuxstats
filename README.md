@@ -43,7 +43,7 @@ If your desktop environment supports it, you can also double-click the package t
 Build and install locally from this repo:
 
 ```bash
-git clone https://github.com/aayanmasud/linuxstats.git
+git clone https://github.com/modenlaggard/linuxstats.git
 cd linuxstats
 makepkg -si
 ```
