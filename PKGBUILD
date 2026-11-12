@@ -1,4 +1,4 @@
-# Maintainer: aayanmasud1@outlook.com
+# Maintainer: Moden Laggard
 pkgname=linuxstats
 pkgver=0.1.2
 pkgrel=1
