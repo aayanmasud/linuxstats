@@ -13,8 +13,8 @@ use eframe::egui;
 use sysinfo::{get_current_pid, Disks, Pid, Signal, System};
 
 const HIGH_FAN_RPM_WARNING: u32 = 6_200;
-const LATEST_RELEASE_API: &str = "https://api.github.com/repos/aayanmasud/linuxstats/releases/latest";
-const RELEASES_PAGE: &str = "https://github.com/aayanmasud/linuxstats/releases/latest";
+const LATEST_RELEASE_API: &str = "https://api.github.com/repos/modenlaggard/linuxstats/releases/latest";
+const RELEASES_PAGE: &str = "https://github.com/modenlaggard/linuxstats/releases/latest";
 const SYSTEM_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 const FAN_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 const DISK_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
