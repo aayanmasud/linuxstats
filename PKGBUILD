@@ -4,11 +4,11 @@ pkgver=0.1.2
 pkgrel=1
 pkgdesc="A desktop system monitor for Linux"
 arch=('x86_64' 'aarch64')
-url="https://github.com/aayanmasud/linuxstats"
+url="https://github.com/modenlaggard/linuxstats"
 license=('MIT')
 depends=('glibc')
 makedepends=('cargo' 'rust' 'git' 'make' 'gcc')
-source=("${pkgname}-${pkgver}.tar.gz::https://github.com/aayanmasud/linuxstats/archive/refs/tags/v${pkgver}.tar.gz")
+source=("${pkgname}-${pkgver}.tar.gz::https://github.com/modenlaggard/linuxstats/archive/refs/tags/v${pkgver}.tar.gz")
 sha256sums=('SKIP')
 
 prepare() {
